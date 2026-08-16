@@ -19,11 +19,11 @@ class MyAdapter(
     private val context: Context,
     private val musicList: List<MyMusic.Data>?,
     private val itemClickListener: ItemClickListener,
-    private val currentPosition:Int
+    private val currentPosition: Int
 
-) : RecyclerView.Adapter<MyAdapter.MyViewHolder>(){
+) : RecyclerView.Adapter<MyAdapter.MyViewHolder>() {
 
-    private var selectedItemPosition: Int = RecyclerView.NO_POSITION
+    private var selectedItemPosition: Int = currentPosition
     private var lastPosition = -1
 
     inner class MyViewHolder(val binding: LayoutItemMusicBinding) :

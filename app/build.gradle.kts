@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "com.sk.carmusicapp"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.sk.carmusicapp"
@@ -63,9 +63,15 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.7.0")
     implementation("androidx.activity:activity-ktx:1.8.2")
 
-    //picasso image link to Api
+    // picasso image link to Api
     implementation("com.squareup.picasso:picasso:2.71828")
 
-    //recyclerview
+    // recyclerview
     implementation("androidx.recyclerview:recyclerview:1.3.2")
+
+    // Media3 for background playback
+    val media3_version = "1.5.0"
+    implementation("androidx.media3:media3-exoplayer:$media3_version")
+    implementation("androidx.media3:media3-session:$media3_version")
+    implementation("androidx.media3:media3-ui:$media3_version")
 }

@@ -1,9 +1,10 @@
 package com.sk.carmusicapp.activity
 
 import android.annotation.SuppressLint
-import android.media.MediaPlayer
+import android.content.ComponentName
 import android.os.Bundle
 import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.widget.ImageView
@@ -13,11 +14,19 @@ import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.Observer
 import androidx.lifecycle.lifecycleScope
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+import androidx.media3.common.Player
+import androidx.media3.session.MediaController
+import androidx.media3.session.SessionToken
+import com.google.common.util.concurrent.ListenableFuture
+import com.google.common.util.concurrent.MoreExecutors
 import com.sk.carmusicapp.R
 import com.sk.carmusicapp.adapter.MyAdapter
 import com.sk.carmusicapp.api.Response
 import com.sk.carmusicapp.databinding.ActivityMainBinding
 import com.sk.carmusicapp.model.MyMusic
+import com.sk.carmusicapp.service.PlaybackService
 import com.sk.carmusicapp.viewmodel.MusicViewModel
 import com.squareup.picasso.Picasso
 import kotlinx.coroutines.launch
@@ -31,29 +40,82 @@ class MainActivity : AppCompatActivity(), MyAdapter.ItemClickListener {
     private lateinit var songTitle: TextView
     private lateinit var singerName: TextView
     private lateinit var seekBar: SeekBar
-    private lateinit var mMediaPlayer: MediaPlayer
+    
+    private var controllerFuture: ListenableFuture<MediaController>? = null
+    private val controller: MediaController?
+        get() = if (controllerFuture?.isDone == true) controllerFuture?.get() else null
+
     private val musicList: ArrayList<MyMusic.Data> = ArrayList()
     private var playPosition: Int = 0
     private lateinit var timerTextView: TextView
-    private var songId: Int = 0
-    private lateinit var handler: Handler
+    private var songId: Long = 0
+    private val handler = Handler(Looper.getMainLooper())
     private var nextSongPosition: Int = 0
     private var previousSongPosition: Int = 0
 
+    companion object {
+        private const val PREF_NAME = "MusicAppPrefs"
+        private const val KEY_LAST_SONG_ID = "last_song_id"
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(mainActivity.root)
         musicViewModel.mutableLiveDataResponse.observe(this, musicListObserver)
-        handler = Handler()
-        mMediaPlayer = MediaPlayer()
         initializeViews()
         initializeListeners()
         apiCalMusicList()
         Log.d("TAG", "onCreate: $songId")
 
         mainActivity.backBtn.setOnClickListener { onBackPressed() }
+    }
 
+    override fun onStart() {
+        super.onStart()
+        val sessionToken = SessionToken(this, ComponentName(this, PlaybackService::class.java))
+        controllerFuture = MediaController.Builder(this, sessionToken).buildAsync()
+        controllerFuture?.addListener({
+            setupSeekBar()
+            updateUIFromController()
+            controller?.addListener(object : Player.Listener {
+                override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                    updateUIFromController()
+                }
+
+                override fun onIsPlayingChanged(isPlaying: Boolean) {
+                    mainActivity.ivPlay.setImageResource(
+                        if (isPlaying) R.drawable.btn_pause else R.drawable.btn_play
+                    )
+                }
+            })
+        }, MoreExecutors.directExecutor())
+    }
+
+    override fun onStop() {
+        super.onStop()
+        controllerFuture?.let {
+            MediaController.releaseFuture(it)
+        }
+    }
+
+    private fun updateUIFromController() {
+        val player = controller ?: return
+        val currentMediaItem = player.currentMediaItem ?: return
+        val metadata = currentMediaItem.mediaMetadata
+        
+        mainActivity.tvSongTitle.text = metadata.title
+        mainActivity.tvSingerName.text = metadata.artist
+        Picasso.get().load(metadata.artworkUri).into(mainActivity.imageViewControl)
+        
+        // Update highlight in list
+        val currentId = currentMediaItem.mediaId.toLongOrNull() ?: -1L
+        val position = musicList.indexOfFirst { it.id == currentId }
+        if (position != -1) {
+            playPosition = position
+            myAdapter = MyAdapter(this@MainActivity, musicList, this, position)
+            mainActivity.recyclerview.adapter = myAdapter
+            mainActivity.recyclerview.scrollToPosition(position)
+        }
     }
 
     private fun initializeViews() {
@@ -77,69 +139,18 @@ class MainActivity : AppCompatActivity(), MyAdapter.ItemClickListener {
 
     @SuppressLint("NotifyDataSetChanged")
     private fun playNextSong() {
-        if (musicList.isNotEmpty()) {
-            // Increment the playPosition to move to the next song
-            playPosition = (playPosition + 1) % musicList.size
-
-            if (playPosition >= 0 && playPosition < musicList.size) {
-                val nextSong = musicList[playPosition]
-                Log.d("TAG", "Next button Clicked : Current Song Position: $playPosition")
-                nextSongPosition = playPosition
-                myAdapter = MyAdapter(this@MainActivity, musicList, this,playPosition)
-                mainActivity.recyclerview.adapter = myAdapter
-                myAdapter?.notifyDataSetChanged()
-
-                val nextSongUrl = nextSong.preview
-                val nextSongDuration = nextSong.duration
-                playSong(nextSongUrl, nextSongDuration)
-                songNames(nextSong)
-
-            } else {
-                Log.e("TAG", "Invalid playPosition: $playPosition")
-
-            }
-        } else {
-            Log.d("TAG", "No songs available to play")
-
-        }
-
-
+        controller?.seekToNext()
     }
 
     @SuppressLint("NotifyDataSetChanged")
     private fun playPreviousSong() {
-        if (musicList.isNotEmpty()) {
-
-            val previousPosition = if (playPosition > 0) playPosition - 1 else musicList.size - 1
-
-            // Ensure the calculated index is within bounds
-            if (previousPosition >= 0 && previousPosition < musicList.size) {
-                val previousSong = musicList[previousPosition]
-                Log.d("TAG", "Previous button Clicked : Current Song Position: $previousPosition")
-                previousSongPosition = previousPosition
-                myAdapter = MyAdapter(this@MainActivity, musicList, this,previousPosition)
-                mainActivity.recyclerview.adapter = myAdapter
-                myAdapter?.notifyDataSetChanged()
-                val previousSongUrl = previousSong.preview
-                val songDuration = previousSong.duration
-                playSong(previousSongUrl, songDuration)
-                songNames(previousSong)
-                // Update the playPosition to the previous index
-                playPosition = previousPosition
-
-            } else {
-                Log.e("TAG", "Invalid previousPosition: $previousPosition")
-            }
-        } else {
-            Log.d("TAG", "No songs available to play")
-        }
-
+        controller?.seekToPrevious()
     }
 
     private fun apiCalMusicList() {
         lifecycleScope.launch {
-//            musicViewModel.getMusicList("Padayappa")
-            musicViewModel.getMusicList("eminem")
+            musicViewModel.getMusicList("Padayappa")
+//            musicViewModel.getMusicList("eminem")
         }
     }
 
@@ -148,15 +159,53 @@ class MainActivity : AppCompatActivity(), MyAdapter.ItemClickListener {
     private val musicListObserver = Observer<Response<MyMusic>> { response ->
         when (response) {
             is Response.Success -> {
+                musicList.clear()
                 musicList.addAll(response.data!!.data)
-                myAdapter = MyAdapter(this@MainActivity, response.data?.data, this,0)
+                
+                // Add songs to controller playlist
+                controller?.let { player ->
+                    player.clearMediaItems()
+                    val mediaItems = musicList.map { song ->
+                        MediaItem.Builder()
+                            .setMediaId(song.id.toString())
+                            .setUri(song.preview)
+                            .setMediaMetadata(
+                                MediaMetadata.Builder()
+                                    .setTitle(song.title)
+                                    .setArtist(song.artist.name)
+                                    .setArtworkUri(android.net.Uri.parse(song.album.cover))
+                                    .build()
+                            )
+                            .build()
+                    }
+                    player.setMediaItems(mediaItems)
+                    player.prepare()
+                }
+
+                // Restore last played song state
+                val sharedPreferences = getSharedPreferences(PREF_NAME, MODE_PRIVATE)
+                val lastSongId = sharedPreferences.getLong(KEY_LAST_SONG_ID, -1L)
+                
+                var initialPosition = 0
+                if (lastSongId != -1L) {
+                    val lastSongIndex = musicList.indexOfFirst { it.id == lastSongId }
+                    if (lastSongIndex != -1) {
+                        initialPosition = lastSongIndex
+                        musicList[initialPosition].isSelected = true
+                        playPosition = initialPosition
+                        
+                        // Update UI to show last played song info
+                        val song = musicList[initialPosition]
+                        mainActivity.tvSongTitle.text = song.title
+                        mainActivity.tvSingerName.text = song.artist.name
+                        Picasso.get().load(song.album.cover).into(mainActivity.imageViewControl)
+                    }
+                }
+
+                myAdapter = MyAdapter(this@MainActivity, musicList, this, initialPosition)
                 mainActivity.recyclerview.adapter = myAdapter
                 myAdapter?.notifyDataSetChanged()
-
-                // Automatically select the first song and update UI
-//                response.data?.data?.firstOrNull()?.let { firstSong ->
-//                    onItemClick(firstSong, position = 0)
-//                }
+                mainActivity.recyclerview.scrollToPosition(initialPosition)
             }
 
             is Response.Error -> {
@@ -177,161 +226,70 @@ class MainActivity : AppCompatActivity(), MyAdapter.ItemClickListener {
 
     @SuppressLint("NotifyDataSetChanged")
     override fun onItemClick(item: MyMusic.Data, position: Int) {
-        item.isSelected = true
-        playPosition = position
-        myAdapter?.notifyDataSetChanged()
-
-        mainActivity.tvSongTitle.text = item.title
-        mainActivity.tvSingerName.text = item.artist.name
-        Picasso.get().load(item.album.cover).into(mainActivity.imageViewControl)
-
-        playSong(item.preview, item.duration)
-        songId = item.id.toInt()
-
-        mMediaPlayer = MediaPlayer()
-        mMediaPlayer?.setDataSource(item.preview)
-
-
-        mMediaPlayer?.prepare()
-        seekBar.max = mMediaPlayer!!.duration ?: 0
-        mMediaPlayer!!.setOnPreparedListener {
-            mMediaPlayer.start()
-            setupSeekBar()
+        controller?.let { player ->
+            player.seekTo(position, 0)
+            player.play()
         }
-        mainActivity.ivPlay.setImageResource(R.drawable.btn_pause)
 
-
+        // Save last played song ID
+        getSharedPreferences(PREF_NAME, MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_LAST_SONG_ID, item.id)
+            .apply()
     }
 
     private fun setupSeekBar() {
-
         seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 if (fromUser) {
-                    mMediaPlayer.seekTo(progress)
+                    controller?.seekTo(progress.toLong())
                 }
             }
 
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {
-                mMediaPlayer.pause()
-            }
-
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                mMediaPlayer.start()
-            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
-        val handler = Handler()
-        handler.postDelayed(object : Runnable {
+
+        handler.post(object : Runnable {
             override fun run() {
-                val currentPosition = mMediaPlayer.currentPosition
-                seekBar.progress = currentPosition
+                controller?.let { player ->
+                    val currentPosition = player.currentPosition
+                    val duration = player.duration
+                    
+                    seekBar.max = if (duration > 0) duration.toInt() else 100
+                    seekBar.progress = currentPosition.toInt()
 
-                val minutes = currentPosition / 1000 / 60
-                val seconds = (currentPosition / 1000) % 60
-                mainActivity.tvTimePost.text = String.format("%02d:%02d", minutes, seconds)
+                    val minutes = currentPosition / 1000 / 60
+                    val seconds = (currentPosition / 1000) % 60
+                    mainActivity.tvTimePost.text = String.format("%02d:%02d", minutes, seconds)
 
-
-                val totalDuration = mMediaPlayer.duration
-                val totalMinutes = totalDuration / 1000 / 60
-                val totalSeconds = (totalDuration / 1000) % 60
-                mainActivity.tvTimePre.text = String.format("%02d:%02d", totalMinutes, totalSeconds)
+                    val totalMinutes = duration / 1000 / 60
+                    val totalSeconds = (duration / 1000) % 60
+                    mainActivity.tvTimePre.text = String.format("%02d:%02d", totalMinutes, totalSeconds)
+                }
                 handler.postDelayed(this, 1000)
             }
-
-        }, 0)
-
-    }
-
-    private fun playSong(songUrl: String, playDuration: Int) {
-//        startSongTimer(playDuration)
-//        startSeekBarUpdate(playDuration)
-
-//      if song is already playig time to click next song it will continue wo
-        if (mMediaPlayer.isPlaying) {
-            mMediaPlayer.stop()
-            mMediaPlayer.reset()
-        }
-        try {
-            mMediaPlayer.setDataSource(songUrl)
-            mMediaPlayer.prepareAsync()
-            // Set a listener to start playing the song
-            mMediaPlayer.setOnPreparedListener {
-                seekBar?.max = mMediaPlayer?.duration ?: 0
-                // Start updating seekbar progress
-                mMediaPlayer.start()
-                // Update the play/pause button to pause state when a new song starts playing
-                mainActivity.ivPlay.setImageResource(R.drawable.btn_pause)
-
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
-
+        })
+        
         mainActivity.ivPlay.setOnClickListener {
-            if (mMediaPlayer.isPlaying) {
-                mMediaPlayer.pause()
-                mainActivity.ivPlay.setImageResource(R.drawable.btn_play)
-            } else {
-                try {
-                    mMediaPlayer.reset()
-                    mMediaPlayer.setDataSource(songUrl) // Set data source here
-
-                    mMediaPlayer.prepareAsync()
-
-                    mMediaPlayer.setOnPreparedListener { mediaPlayer ->
-                        mediaPlayer.start()
-                        mainActivity.ivPlay.setImageResource(R.drawable.btn_pause)
-                    }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
+            controller?.let { player ->
+                if (player.isPlaying) player.pause() else player.play()
             }
-
-        }
-        //        mainActivity.ivPlay.setOnClickListener {
-//            if (mMediaPlayer.isPlaying) {
-//                mMediaPlayer.pause()
-//                mainActivity.ivPlay.setImageResource(R.drawable.btn_play)
-//            } else {
-//                try {
-//                    mMediaPlayer.reset()
-//                    mMediaPlayer?.setDataSource(item.preview)
-//                    mMediaPlayer.prepare()
-//                    mMediaPlayer.start()
-//                    mainActivity.ivPlay.setImageResource(R.drawable.btn_pause)
-//                } catch (e: Exception) {
-//                    e.printStackTrace()
-//                }
-//
-//            }
-//        }
-
-    }
-
-    private fun songNames(data: MyMusic.Data? = null) {
-        data?.let {
-            songTitle.text = it.title
-            singerName.text = it.artist.name
-            Picasso.get().load(it.album.cover).into(imageView)
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        mMediaPlayer.release()
+        handler.removeCallbacksAndMessages(null)
     }
 
     override fun onPause() {
         super.onPause()
-        if (mMediaPlayer.isPlaying) {
-            mMediaPlayer.pause()
-        }
     }
 
     override fun onBackPressed() {
+        // Remove recursive call
         super.onBackPressed()
-        onBackPressed()
     }
 
 
